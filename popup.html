@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system, "Segoe UI", sans-serif; width: 240px; margin: 0; padding: 14px; font-size: 14px; }
+    h1 { font-size: 15px; margin: 0 0 12px; }
+    label { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; cursor: pointer; }
+    .site { color: #666; font-size: 12px; margin-top: 2px; word-break: break-all; }
+    hr { border: none; border-top: 1px solid #ddd; margin: 4px 0; }
+    .note { color: #888; font-size: 11px; margin-top: 10px; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #222; color: #eee; } .site { color: #aaa; } hr { border-color: #444; }
+    }
+  </style>
+</head>
+<body>
+  <h1>יישור עברית לימין</h1>
+  <label>
+    <span>פעיל בכל האתרים</span>
+    <input type="checkbox" id="global">
+  </label>
+  <hr>
+  <label>
+    <span>פעיל באתר הזה<div class="site" id="host"></div></span>
+    <input type="checkbox" id="site">
+  </label>
+  <div class="note">השינוי חל מיד, בלי לרענן את הדף.</div>
+  <script src="popup.js"></script>
+</body>
+</html>
