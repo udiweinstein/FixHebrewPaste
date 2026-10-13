@@ -1,11 +1,11 @@
 #!/bin/bash
 # בונה את FixHebrewPaste.app מתוך main.swift (דורש Xcode Command Line Tools:  xcode-select --install)
 # הבינארי הוא Universal (Apple Silicon + Intel) כשאפשר.
-#   VERSION=1.2.0 ./build.sh   — קובע את מספר הגרסה
+#   מספר הגרסה נלקח מהקובץ VERSION (אפשר לעקוף: VERSION=1.2.0 ./build.sh)
 set -e
 cd "$(dirname "$0")"
 
-VERSION="${VERSION:-1.1.0}"
+VERSION="${VERSION:-$(tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.0.0)}"
 VERSION="${VERSION#v}"
 APP="FixHebrewPaste.app"
 BIN="FixHebrewPaste"

@@ -1,15 +1,17 @@
 name: Build & Release
 
-# רץ כשדוחפים תגית גרסה (v1.1.0), או ידנית מלשונית Actions → Run workflow
+# רץ כשמשנים את הקוד / את VERSION ב-main, כשדוחפים תגית v*, או ידנית מלשונית Actions → Run workflow.
+# מספר הגרסה נלקח מהקובץ VERSION (אלא אם הוזן ידנית או נדחפה תגית).
 on:
   push:
+    branches: [main]
+    paths: ["main.swift", "build.sh", "VERSION", ".github/workflows/release.yml"]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "מספר גרסה (לדוגמה v1.1.0)"
-        required: true
-        default: "v1.1.0"
+        description: "מספר גרסה (ריק = לפי הקובץ VERSION)"
+        required: false
 
 permissions:
   contents: write
@@ -23,7 +25,9 @@ jobs:
       - name: Resolve version
         id: v
         run: |
-          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          TAG="${{ github.event.inputs.version }}"
+          if [ -z "$TAG" ] && [ "${{ github.ref_type }}" = "tag" ]; then TAG="${{ github.ref_name }}"; fi
+          if [ -z "$TAG" ]; then TAG="$(tr -d '[:space:]' < VERSION)"; fi
           case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 

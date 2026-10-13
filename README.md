@@ -52,7 +52,7 @@ open FixHebrewPaste.app
 
 ### פרסום גרסה חדשה
 
-הבנייה וה-Release נעשים אוטומטית ב-GitHub Actions. דוחפים תגית גרסה (`git tag v1.2.0 && git push origin v1.2.0`), או בלשונית **Actions ← Build & Release ← Run workflow** מזינים מספר גרסה.
+הבנייה וה-Release נעשים אוטומטית ב-GitHub Actions: משנים את המספר בקובץ `VERSION` (למשל `1.2.0`) ודוחפים ל-`main`. אפשר גם להפעיל ידנית בלשונית **Actions ← Build & Release ← Run workflow**.
 
 ## פרטיות
 
