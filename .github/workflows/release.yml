@@ -1,0 +1,57 @@
+name: Build & Release
+
+# רץ כשדוחפים תגית גרסה (v1.1.0), או ידנית מלשונית Actions → Run workflow
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "מספר גרסה (לדוגמה v1.1.0)"
+        required: true
+        default: "v1.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build app
+        run: |
+          chmod +x build.sh
+          VERSION="${{ steps.v.outputs.tag }}" ./build.sh
+
+      - name: Package
+        run: ditto -c -k --sequesterRsrc --keepParent FixHebrewPaste.app FixHebrewPaste.zip
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: FixHebrewPaste ${{ steps.v.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: FixHebrewPaste.zip
+          body: |
+            ### מה חדש
+            - **⌘R** פותח את Terminal
+            - **⌘D** ממזער את כל החלונות, ולחיצה נוספת מחזירה אותם (כמו Win+D)
+            - מתג בתפריט להפעלה/כיבוי של ⌘R / ⌘D
+            - פתיחה אוטומטית בהפעלת המחשב (macOS 13+)
+            - בינארי Universal: Apple Silicon ו-Intel
+
+            ### התקנה
+            1. מורידים את `FixHebrewPaste.zip`, פותחים וגוררים את האפליקציה לתיקיית **Applications**.
+            2. בפתיחה הראשונה macOS יחסום אותה (האפליקציה לא חתומה אצל Apple):
+               **System Settings ← Privacy & Security ← Open Anyway**.
+               או ב-Terminal: `xattr -dr com.apple.quarantine /Applications/FixHebrewPaste.app`

@@ -8,11 +8,14 @@
 //   • עברית + הפיסוק שסביב האנגלית  →  <span dir="rtl" lang="he">   (RTF: \rtlch)
 // ופסקאות שיש בהן עברית מקבלות dir="rtl". שאר ה-HTML (מודגש, תבליטים, כותרות) נשאר כמו שהוא.
 //
+// בנוסף: ⌘R פותח Terminal, ⌘D ממזער/מחזיר את כל החלונות (כמו Win+D).
+//
 // בנייה:  ./build.sh
 // בדיקה:  ./FixHebrewPaste.app/Contents/MacOS/FixHebrewPaste --cli-html < in.html
 
 import Cocoa
 import Carbon
+import ServiceManagement
 
 // MARK: - סיווג כיווניות
 
@@ -528,6 +531,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var autoItem: NSMenuItem!
     private var markdownItem: NSMenuItem!
     private var modeItems: [NSMenuItem] = []
+    private var windowKeysItem: NSMenuItem!
+    private var loginItem: NSMenuItem!
+    private var windowKeyRefs: [EventHotKeyRef?] = []
+    private var minimizedByUs: [AXUIElement] = []
     private var window: NSWindow?
     private var textView: NSTextView?
     private var timer: Timer?
@@ -541,6 +548,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cleanMarkdown: Bool {
         get { defaults.object(forKey: "cleanMarkdown") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "cleanMarkdown") }
+    }
+    private var windowShortcuts: Bool {
+        get { defaults.object(forKey: "windowShortcuts") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "windowShortcuts") }
     }
     private var mode: OutputMode {
         get { OutputMode(rawValue: defaults.string(forKey: "outputMode") ?? "") ?? .html }
@@ -614,6 +625,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         winItem.target = self
         menu.addItem(winItem)
         menu.addItem(.separator())
+
+        let termItem = NSMenuItem(title: "פתח Terminal", action: #selector(openTerminal), keyEquivalent: "r")
+        termItem.keyEquivalentModifierMask = [.command]
+        termItem.target = self
+        let minItem = NSMenuItem(title: "מזער / החזר את כל החלונות", action: #selector(toggleMinimizeAll), keyEquivalent: "d")
+        minItem.keyEquivalentModifierMask = [.command]
+        minItem.target = self
+        windowKeysItem = NSMenuItem(title: "הפעל את הקיצורים ⌘R / ⌘D", action: #selector(toggleWindowShortcuts), keyEquivalent: "")
+        windowKeysItem.target = self
+        loginItem = NSMenuItem(title: "פתח אוטומטית בהפעלת המחשב", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        loginItem.target = self
+        menu.addItem(termItem)
+        menu.addItem(minItem)
+        menu.addItem(windowKeysItem)
+        menu.addItem(.separator())
+        menu.addItem(loginItem)
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "יציאה", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
         refreshChecks()
@@ -622,6 +650,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshChecks() {
         autoItem.state = autoMode ? .on : .off
         markdownItem.state = cleanMarkdown ? .on : .off
+        windowKeysItem.state = windowShortcuts ? .on : .off
+        loginItem.state = launchAtLogin ? .on : .off
         for item in modeItems {
             item.state = (item.representedObject as? String) == mode.rawValue ? .on : .off
         }
@@ -728,6 +758,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch id {
         case 1: fixClipboardAction()
         case 2: fixAndPasteAction()
+        case 3: openTerminal()
+        case 4: toggleMinimizeAll()
         default: break
         }
     }
@@ -745,15 +777,116 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return noErr
         }, 1, &spec, nil, nil)
 
-        let keys: [(UInt32, Int)] = [
-            (1, controlKey | optionKey),             // ⌃⌥V  — תקן את הלוח
-            (2, controlKey | optionKey | cmdKey),    // ⌃⌥⌘V — תקן והדבק
-        ]
-        for (id, mods) in keys {
-            var ref: EventHotKeyRef?
-            let hk = EventHotKeyID(signature: OSType(0x48465058), id: id)
-            RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(mods), hk, GetApplicationEventTarget(), 0, &ref)
+        _ = registerKey(id: 1, keyCode: kVK_ANSI_V, mods: controlKey | optionKey)            // ⌃⌥V  — תקן את הלוח
+        _ = registerKey(id: 2, keyCode: kVK_ANSI_V, mods: controlKey | optionKey | cmdKey)   // ⌃⌥⌘V — תקן והדבק
+        setWindowShortcuts(enabled: windowShortcuts)
+    }
+
+    private func registerKey(id: UInt32, keyCode: Int, mods: Int) -> EventHotKeyRef? {
+        var ref: EventHotKeyRef?
+        let hk = EventHotKeyID(signature: OSType(0x48465058), id: id)
+        RegisterEventHotKey(UInt32(keyCode), UInt32(mods), hk, GetApplicationEventTarget(), 0, &ref)
+        return ref
+    }
+
+    // ⌘R ו-⌘D תופסים את המקשים בכל המערכת, לכן אפשר לכבות אותם מהתפריט.
+    // קודי המקשים פיזיים — עובד גם כשהמקלדת על עברית.
+    private func setWindowShortcuts(enabled: Bool) {
+        for ref in windowKeyRefs { if let r = ref { UnregisterEventHotKey(r) } }
+        windowKeyRefs = []
+        guard enabled else { return }
+        windowKeyRefs.append(registerKey(id: 3, keyCode: kVK_ANSI_R, mods: cmdKey))   // ⌘R — Terminal
+        windowKeyRefs.append(registerKey(id: 4, keyCode: kVK_ANSI_D, mods: cmdKey))   // ⌘D — מזעור כל החלונות
+    }
+
+    // MARK: Terminal
+
+    @objc func openTerminal() {
+        let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal")
+            ?? URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: cfg, completionHandler: nil)
+    }
+
+    // MARK: מזעור / שחזור כל החלונות (כמו Win+D: לחיצה שנייה מחזירה)
+
+    private func axTrusted(prompt: Bool) -> Bool {
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
+        return AXIsProcessTrustedWithOptions(opts)
+    }
+
+    private static func isMinimized(_ w: AXUIElement) -> Bool {
+        var v: CFTypeRef?
+        AXUIElementCopyAttributeValue(w, kAXMinimizedAttribute as CFString, &v)
+        return (v as? Bool) == true
+    }
+
+    @objc func toggleMinimizeAll() {
+        guard axTrusted(prompt: true) else { return }   // דורש הרשאת נגישות
+
+        let previous = minimizedByUs
+        minimizedByUs = []
+
+        // לחיצה שנייה: אם חלונות שמזערנו עדיין ממוזערים — מחזירים אותם
+        if previous.contains(where: AppDelegate.isMinimized) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                for w in previous.reversed() {
+                    AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                }
+            }
+            return
         }
+
+        let pids = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && !$0.isHidden && $0.processIdentifier != getpid() }
+            .map { $0.processIdentifier }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var done: [AXUIElement] = []
+            for pid in pids {
+                let axApp = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(axApp, 1.0)
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
+                      let windows = value as? [AXUIElement] else { continue }
+                for w in windows {
+                    var sub: CFTypeRef?
+                    AXUIElementCopyAttributeValue(w, kAXSubroleAttribute as CFString, &sub)
+                    guard (sub as? String) == (kAXStandardWindowSubrole as String) else { continue }
+                    if AppDelegate.isMinimized(w) { continue }
+                    if AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
+                        done.append(w)
+                    }
+                }
+            }
+            let result = done
+            DispatchQueue.main.async { self?.minimizedByUs = result }
+        }
+    }
+
+    // MARK: הפעלה אוטומטית עם הכניסה למחשב
+
+    private var launchAtLogin: Bool {
+        if #available(macOS 13.0, *) { return SMAppService.mainApp.status == .enabled }
+        return false
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        if #available(macOS 13.0, *) {
+            do {
+                if launchAtLogin { try SMAppService.mainApp.unregister() } else { try SMAppService.mainApp.register() }
+            } catch {
+                NSSound.beep()
+            }
+        }
+        refreshChecks()
+    }
+
+    @objc private func toggleWindowShortcuts() {
+        windowShortcuts.toggle()
+        setWindowShortcuts(enabled: windowShortcuts)
+        refreshChecks()
     }
 
     // MARK: חלון המרה ידני (לטקסט שמקלידים/מדביקים)

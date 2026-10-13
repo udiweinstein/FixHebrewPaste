@@ -17,25 +17,42 @@
 - **המר סימוני Markdown** — ממיר סימוני Markdown נפוצים, כגון `**מודגש**` וכותרות, לעיצוב מתאים.
 - **חלון המרה** — מאפשר להקליד או להדביק טקסט ידנית ולהעתיק ללוח את הגרסה המתוקנת.
 
+## קיצורי חלונות (בונוס)
+
+- `⌘R` — פותח את Terminal (או מביא אותו לחזית).
+- `⌘D` — ממזער את כל החלונות הפתוחים; לחיצה נוספת מחזירה אותם, כמו `Win+D` ב-Windows. דורש הרשאת נגישות.
+- שני הקיצורים עובדים גם כשהמקלדת על עברית. מכיוון שהם תופסים את `⌘R` / `⌘D` בכל המערכת (למשל רענון דף או סימנייה בדפדפן), אפשר לכבות אותם מהתפריט: **הפעל את הקיצורים ⌘R / ⌘D**.
+- **פתח אוטומטית בהפעלת המחשב** — מפעיל את האפליקציה עם הכניסה למחשב (macOS 13 ומעלה, כשהאפליקציה בתיקיית Applications).
+
 העיבוד מזהה פסקאות וקטעים בעברית ובאנגלית ומגדיר להם כיווניות מפורשת, תוך שמירה על מבנה ועיצוב HTML ככל האפשר. אם תיקון והדבקה מבקש הרשאת נגישות, יש לאשר אותה בהגדרות macOS כדי שהתוכנה תוכל לשלוח את פקודת ההדבקה ליישום הפעיל. קיצורי התיקון עצמם אינם דורשים הרשאה זו.
 
-## התקנה והרצה
+## התקנה
 
-נדרשת macOS 11 ומעלה. המאגר כולל אפליקציה מוכנה; אפשר לשכפל את המאגר ולהפעיל אותה:
+1. מורידים את `FixHebrewPaste.zip` מהגרסה האחרונה בעמוד [Releases](https://github.com/udiweinstein/FixHebrewPaste/releases/latest).
+2. פותחים את הקובץ וגוררים את `FixHebrewPaste.app` לתיקיית **Applications**.
+3. בפתיחה הראשונה macOS יחסום את האפליקציה, כי היא לא חתומה אצל Apple. פותחים **System Settings ← Privacy & Security** ולוחצים **Open Anyway**.
+   לחלופין, ב-Terminal:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/FixHebrewPaste.app
+   ```
 
-```sh
-git clone https://github.com/udiweinstein/FixHebrewPaste.git
-cd FixHebrewPaste
-open FixHebrewPaste.app
-```
+נדרשת macOS 11 ומעלה. האפליקציה עובדת גם על Apple Silicon וגם על Intel.
 
-לבנייה מחדש מקוד המקור נדרשים Xcode Command Line Tools:
+### בנייה מקוד המקור
+
+נדרשים Xcode Command Line Tools:
 
 ```sh
 xcode-select --install
+git clone https://github.com/udiweinstein/FixHebrewPaste.git
+cd FixHebrewPaste
 ./build.sh
 open FixHebrewPaste.app
 ```
+
+### פרסום גרסה חדשה
+
+הבנייה וה-Release נעשים אוטומטית ב-GitHub Actions. דוחפים תגית גרסה (`git tag v1.2.0 && git push origin v1.2.0`), או בלשונית **Actions ← Build & Release ← Run workflow** מזינים מספר גרסה.
 
 ## פרטיות
 
