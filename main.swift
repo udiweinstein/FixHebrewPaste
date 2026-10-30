@@ -8,8 +8,6 @@
 //   • עברית + הפיסוק שסביב האנגלית  →  <span dir="rtl" lang="he">   (RTF: \rtlch)
 // ופסקאות שיש בהן עברית מקבלות dir="rtl". שאר ה-HTML (מודגש, תבליטים, כותרות) נשאר כמו שהוא.
 //
-// בנוסף: ⌘R פותח Terminal, ⌘D ממזער/מחזיר את כל החלונות (כמו Win+D).
-//
 // בנייה:  ./build.sh
 // בדיקה:  ./FixHebrewPaste.app/Contents/MacOS/FixHebrewPaste --cli-html < in.html
 
@@ -739,11 +737,71 @@ enum AppInfo {
     static let repoURL = "https://github.com/udiweinstein/FixHebrewPaste"
 }
 
+// MARK: - בדיקת עדכונים (מול עמוד ה-Releases ב-GitHub)
+
+enum Updates {
+    static let apiURL = URL(string: "https://api.github.com/repos/udiweinstein/FixHebrewPaste/releases/latest")!
+
+    struct Release {
+        let version: String   // בלי v
+        let pageURL: URL
+    }
+
+    enum Failure: Error { case badResponse }
+
+    /// השוואת גרסאות מספרית: 1.10.0 > 1.9.2
+    static func isNewer(_ a: String, than b: String) -> Bool {
+        func parts(_ v: String) -> [Int] {
+            v.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+             .split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
+        }
+        var x = parts(a), y = parts(b)
+        let n = max(x.count, y.count)
+        x += Array(repeating: 0, count: n - x.count)
+        y += Array(repeating: 0, count: n - y.count)
+        for (p, q) in zip(x, y) where p != q { return p > q }
+        return false
+    }
+
+    static func fetchLatest(_ completion: @escaping (Result<Release, Error>) -> Void) {
+        var req = URLRequest(url: apiURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("FixHebrewPaste/\(AppInfo.version)", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: req) { data, response, error in
+            if let error = error { return completion(.failure(error)) }
+            guard (response as? HTTPURLResponse)?.statusCode == 200, let data = data,
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let tag = json["tag_name"] as? String else {
+                return completion(.failure(Failure.badResponse))
+            }
+            let page = (json["html_url"] as? String).flatMap(URL.init(string:))
+                ?? URL(string: AppInfo.repoURL + "/releases/latest")!
+            let version = tag.hasPrefix("v") || tag.hasPrefix("V") ? String(tag.dropFirst()) : tag
+            completion(.success(Release(version: version, pageURL: page)))
+        }.resume()
+    }
+}
+
 // MARK: - מצב שורת פקודה (לבדיקות)
 
 let cliArgs = CommandLine.arguments
 if cliArgs.contains("--version") {
     print("FixHebrewPaste \(AppInfo.version)")
+    exit(0)
+}
+if cliArgs.contains("--check-update") {
+    let done = DispatchSemaphore(value: 0)
+    Updates.fetchLatest { result in
+        switch result {
+        case .success(let r):
+            print("current: \(AppInfo.version), latest: \(r.version), update available: \(Updates.isNewer(r.version, than: AppInfo.version))")
+        case .failure(let e):
+            print("update check failed: \(e)")
+        }
+        done.signal()
+    }
+    done.wait()
+    print("compare self-test: \(Updates.isNewer("1.10.0", than: "1.9.2")) \(Updates.isNewer("1.2.0", than: "1.2")) \(Updates.isNewer("v2.0", than: "1.9.9"))")
     exit(0)
 }
 if cliArgs.contains("--ocr-selftest") {
@@ -808,10 +866,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var autoItem: NSMenuItem!
     private var markdownItem: NSMenuItem!
     private var modeItems: [NSMenuItem] = []
-    private var windowKeysItem: NSMenuItem!
     private var loginItem: NSMenuItem!
-    private var windowKeyRefs: [EventHotKeyRef?] = []
-    private var minimizedByUs: [AXUIElement] = []
+    private var updateItem: NSMenuItem!
+    private var updateSeparator: NSMenuItem!
+    private var autoUpdateItem: NSMenuItem!
+    private var availableUpdate: Updates.Release?
+    private var updateTimer: Timer?
+    /// כותרת הסמל בשורת התפריטים (מקבלת נקודה כשיש עדכון)
+    private var baseTitle: String { availableUpdate == nil ? "אA" : "אA•" }
     private var window: NSWindow?
     private var textView: NSTextView?
     private var timer: Timer?
@@ -826,9 +888,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         get { defaults.object(forKey: "cleanMarkdown") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "cleanMarkdown") }
     }
-    private var windowShortcuts: Bool {
-        get { defaults.object(forKey: "windowShortcuts") as? Bool ?? true }
-        set { defaults.set(newValue, forKey: "windowShortcuts") }
+    private var autoUpdateCheck: Bool {
+        get { defaults.object(forKey: "autoUpdateCheck") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "autoUpdateCheck") }
     }
     private var mode: OutputMode {
         get { OutputMode(rawValue: defaults.string(forKey: "outputMode") ?? "") ?? .html }
@@ -842,6 +904,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKeys()
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
             self?.pollPasteboard()
+        }
+        // בדיקת עדכונים: כמה שניות אחרי ההפעלה, ואחר כך פעם ביום
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            if self?.autoUpdateCheck == true { self?.checkForUpdates(manual: false) }
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+            if self?.autoUpdateCheck == true { self?.checkForUpdates(manual: false) }
         }
     }
 
@@ -869,6 +938,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = "אA"
 
         let menu = NSMenu()
+        updateItem = NSMenuItem(title: "", action: #selector(openUpdatePage), keyEquivalent: "")
+        updateItem.target = self
+        updateItem.isHidden = true
+        updateSeparator = NSMenuItem.separator()
+        updateSeparator.isHidden = true
+        menu.addItem(updateItem)
+        menu.addItem(updateSeparator)
+
         let fixItem = NSMenuItem(title: "תקן את הלוח עכשיו", action: #selector(fixClipboardAction), keyEquivalent: "v")
         fixItem.keyEquivalentModifierMask = [.control, .option]
         fixItem.target = self
@@ -907,22 +984,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(winItem)
         menu.addItem(.separator())
 
-        let termItem = NSMenuItem(title: "פתח Terminal", action: #selector(openTerminal), keyEquivalent: "r")
-        termItem.keyEquivalentModifierMask = [.command]
-        termItem.target = self
-        let minItem = NSMenuItem(title: "מזער / החזר את כל החלונות", action: #selector(toggleMinimizeAll), keyEquivalent: "d")
-        minItem.keyEquivalentModifierMask = [.command]
-        minItem.target = self
-        windowKeysItem = NSMenuItem(title: "הפעל את הקיצורים ⌘R / ⌘D", action: #selector(toggleWindowShortcuts), keyEquivalent: "")
-        windowKeysItem.target = self
         loginItem = NSMenuItem(title: "פתח אוטומטית בהפעלת המחשב", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         loginItem.target = self
-        menu.addItem(termItem)
-        menu.addItem(minItem)
-        menu.addItem(windowKeysItem)
-        menu.addItem(.separator())
         menu.addItem(loginItem)
         menu.addItem(.separator())
+        let checkItem = NSMenuItem(title: "בדוק אם יש גרסה חדשה…", action: #selector(checkForUpdatesAction), keyEquivalent: "")
+        checkItem.target = self
+        autoUpdateItem = NSMenuItem(title: "בדוק עדכונים אוטומטית", action: #selector(toggleAutoUpdate), keyEquivalent: "")
+        autoUpdateItem.target = self
+        menu.addItem(checkItem)
+        menu.addItem(autoUpdateItem)
         let aboutItem = NSMenuItem(title: "אודות FixHebrewPaste (גרסה \(AppInfo.version))", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
@@ -934,8 +1005,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshChecks() {
         autoItem.state = autoMode ? .on : .off
         markdownItem.state = cleanMarkdown ? .on : .off
-        windowKeysItem.state = windowShortcuts ? .on : .off
         loginItem.state = launchAtLogin ? .on : .off
+        autoUpdateItem.state = autoUpdateCheck ? .on : .off
         for item in modeItems {
             item.state = (item.representedObject as? String) == mode.rawValue ? .on : .off
         }
@@ -1016,7 +1087,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func flashIcon() {
         statusItem.button?.title = "✓"
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.statusItem.button?.title = "אA"
+            guard let self = self else { return }
+            self.statusItem.button?.title = self.baseTitle
         }
     }
 
@@ -1041,7 +1113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.ocrRunning = false
-                self.statusItem.button?.title = "אA"
+                self.statusItem.button?.title = self.baseTitle
                 switch result {
                 case .success(let r):
                     pb.clearContents()
@@ -1071,6 +1143,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
+    // MARK: עדכונים
+
+    @objc private func toggleAutoUpdate() { autoUpdateCheck.toggle(); refreshChecks() }
+
+    @objc private func checkForUpdatesAction() { checkForUpdates(manual: true) }
+
+    @objc private func openUpdatePage() {
+        NSWorkspace.shared.open(availableUpdate?.pageURL ?? URL(string: AppInfo.repoURL + "/releases/latest")!)
+    }
+
+    /// manual = המשתמש ביקש: מציגים תשובה גם כשאין עדכון או כשהבדיקה נכשלה.
+    /// אוטומטי: שקט, חוץ מהודעה אחת על כל גרסה חדשה.
+    private func checkForUpdates(manual: Bool) {
+        Updates.fetchLatest { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .failure:
+                    if manual {
+                        self.showMessage("לא ניתן לבדוק עדכונים",
+                                         "אין חיבור ל-GitHub כרגע. נסה שוב מאוחר יותר, או בדוק ידנית ב:\n\(AppInfo.repoURL)/releases")
+                    }
+                case .success(let latest):
+                    guard Updates.isNewer(latest.version, than: AppInfo.version) else {
+                        self.setAvailableUpdate(nil)
+                        if manual {
+                            NSApp.activate(ignoringOtherApps: true)
+                            let a = NSAlert()
+                            a.messageText = "יש לך את הגרסה האחרונה"
+                            a.informativeText = "FixHebrewPaste \(AppInfo.version) מעודכנת."
+                            a.runModal()
+                        }
+                        return
+                    }
+                    self.setAvailableUpdate(latest)
+                    let notified = self.defaults.string(forKey: "notifiedUpdateVersion")
+                    if manual || notified != latest.version {
+                        self.defaults.set(latest.version, forKey: "notifiedUpdateVersion")
+                        self.promptUpdate(latest)
+                    }
+                }
+            }
+        }
+    }
+
+    private func setAvailableUpdate(_ r: Updates.Release?) {
+        availableUpdate = r
+        if let r = r { updateItem.title = "⬆︎ גרסה \(r.version) זמינה — לחץ להורדה" }
+        updateItem.isHidden = r == nil
+        updateSeparator.isHidden = r == nil
+        statusItem.button?.title = baseTitle
+    }
+
+    private func promptUpdate(_ r: Updates.Release) {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "גרסה חדשה של FixHebrewPaste זמינה"
+        a.informativeText = "הגרסה שלך: \(AppInfo.version)\nהגרסה החדשה: \(r.version)\n\n" +
+            "בעמוד ההורדה: מורידים את FixHebrewPaste.zip, פותחים, ומחליפים את האפליקציה בתיקיית Applications."
+        a.addButton(withTitle: "לעמוד ההורדה")
+        a.addButton(withTitle: "אחר כך")
+        if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(r.pageURL) }
+    }
+
     // MARK: אודות
 
     @objc func showAbout() {
@@ -1078,8 +1214,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let body: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11),
                                                    .foregroundColor: NSColor.labelColor]
         credits.append(NSAttributedString(string:
-            "תיקון טקסט עברית/אנגלית להדבקה ב-PowerPoint, OCR מהלוח וקיצורי חלונות.\n\n" +
-            "⌃⌥V  תקן את הלוח\n⌃⌥⌘V  תקן והדבק\n⌃⌥O  OCR מהלוח\n⌘R  Terminal    ⌘D  מזעור חלונות\n\n",
+            "תיקון טקסט עברית/אנגלית להדבקה ב-PowerPoint, ו-OCR מהלוח.\n\n" +
+            "⌃⌥V  תקן את הלוח\n⌃⌥⌘V  תקן והדבק\n⌃⌥O  OCR מהלוח\n\n",
             attributes: body))
         var link = body
         link[.link] = URL(string: AppInfo.repoURL)!
@@ -1114,8 +1250,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch id {
         case 1: fixClipboardAction()
         case 2: fixAndPasteAction()
-        case 3: openTerminal()
-        case 4: toggleMinimizeAll()
         case 5: ocrClipboardAction()
         default: break
         }
@@ -1137,7 +1271,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = registerKey(id: 1, keyCode: kVK_ANSI_V, mods: controlKey | optionKey)            // ⌃⌥V  — תקן את הלוח
         _ = registerKey(id: 2, keyCode: kVK_ANSI_V, mods: controlKey | optionKey | cmdKey)   // ⌃⌥⌘V — תקן והדבק
         _ = registerKey(id: 5, keyCode: kVK_ANSI_O, mods: controlKey | optionKey)            // ⌃⌥O  — OCR מהלוח
-        setWindowShortcuts(enabled: windowShortcuts)
     }
 
     private func registerKey(id: UInt32, keyCode: Int, mods: Int) -> EventHotKeyRef? {
@@ -1145,82 +1278,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hk = EventHotKeyID(signature: OSType(0x48465058), id: id)
         RegisterEventHotKey(UInt32(keyCode), UInt32(mods), hk, GetApplicationEventTarget(), 0, &ref)
         return ref
-    }
-
-    // ⌘R ו-⌘D תופסים את המקשים בכל המערכת, לכן אפשר לכבות אותם מהתפריט.
-    // קודי המקשים פיזיים — עובד גם כשהמקלדת על עברית.
-    private func setWindowShortcuts(enabled: Bool) {
-        for ref in windowKeyRefs { if let r = ref { UnregisterEventHotKey(r) } }
-        windowKeyRefs = []
-        guard enabled else { return }
-        windowKeyRefs.append(registerKey(id: 3, keyCode: kVK_ANSI_R, mods: cmdKey))   // ⌘R — Terminal
-        windowKeyRefs.append(registerKey(id: 4, keyCode: kVK_ANSI_D, mods: cmdKey))   // ⌘D — מזעור כל החלונות
-    }
-
-    // MARK: Terminal
-
-    @objc func openTerminal() {
-        let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal")
-            ?? URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        let cfg = NSWorkspace.OpenConfiguration()
-        cfg.activates = true
-        NSWorkspace.shared.openApplication(at: url, configuration: cfg, completionHandler: nil)
-    }
-
-    // MARK: מזעור / שחזור כל החלונות (כמו Win+D: לחיצה שנייה מחזירה)
-
-    private func axTrusted(prompt: Bool) -> Bool {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
-        return AXIsProcessTrustedWithOptions(opts)
-    }
-
-    private static func isMinimized(_ w: AXUIElement) -> Bool {
-        var v: CFTypeRef?
-        AXUIElementCopyAttributeValue(w, kAXMinimizedAttribute as CFString, &v)
-        return (v as? Bool) == true
-    }
-
-    @objc func toggleMinimizeAll() {
-        guard axTrusted(prompt: true) else { return }   // דורש הרשאת נגישות
-
-        let previous = minimizedByUs
-        minimizedByUs = []
-
-        // לחיצה שנייה: אם חלונות שמזערנו עדיין ממוזערים — מחזירים אותם
-        if previous.contains(where: AppDelegate.isMinimized) {
-            DispatchQueue.global(qos: .userInitiated).async {
-                for w in previous.reversed() {
-                    AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-                }
-            }
-            return
-        }
-
-        let pids = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular && !$0.isHidden && $0.processIdentifier != getpid() }
-            .map { $0.processIdentifier }
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var done: [AXUIElement] = []
-            for pid in pids {
-                let axApp = AXUIElementCreateApplication(pid)
-                AXUIElementSetMessagingTimeout(axApp, 1.0)
-                var value: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
-                      let windows = value as? [AXUIElement] else { continue }
-                for w in windows {
-                    var sub: CFTypeRef?
-                    AXUIElementCopyAttributeValue(w, kAXSubroleAttribute as CFString, &sub)
-                    guard (sub as? String) == (kAXStandardWindowSubrole as String) else { continue }
-                    if AppDelegate.isMinimized(w) { continue }
-                    if AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
-                        done.append(w)
-                    }
-                }
-            }
-            let result = done
-            DispatchQueue.main.async { self?.minimizedByUs = result }
-        }
     }
 
     // MARK: הפעלה אוטומטית עם הכניסה למחשב
@@ -1238,12 +1295,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSSound.beep()
             }
         }
-        refreshChecks()
-    }
-
-    @objc private func toggleWindowShortcuts() {
-        windowShortcuts.toggle()
-        setWindowShortcuts(enabled: windowShortcuts)
         refreshChecks()
     }
 

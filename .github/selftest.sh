@@ -16,3 +16,7 @@ note "OCR self-test" "$OCR_OUT"
 HTML_OUT="$(printf '<p>הפרויקט ב-GitHub הוא JS Paint (Pixel-perfect).</p>' | $BIN --cli-html)"
 echo "$HTML_OUT"
 note "HTML fix" "$HTML_OUT"
+
+UPD_OUT="$($BIN --check-update)"
+echo "$UPD_OUT"
+note "Update check" "$UPD_OUT"
