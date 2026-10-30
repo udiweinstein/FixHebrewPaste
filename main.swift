@@ -642,7 +642,8 @@ enum OCR {
             if let b = lastBlock, b != line.block { out.append("") }
             lastBlock = line.block
             let all = line.words.map { $0.text }.joined()
-            let rtl = hebrew(all) >= latin(all) && hebrew(all) > 0
+            // שורה עם עברית משמעותית היא שורה עברית, גם אם יש בה יותר אותיות באנגלית
+            let rtl = hebrew(all) > 0 && hebrew(all) * 2 >= latin(all)
             // מילים בסדר הקריאה של השורה (מימין לשמאל בשורה עברית)
             let ordered = line.words.sorted { rtl ? $0.x > $1.x : $0.x < $1.x }
             // רצפים בכיוון ההפוך (אנגלית בתוך עברית / עברית בתוך אנגלית) — מחזירים לסדר שלהם
