@@ -8,6 +8,8 @@ note() { local msg="${2//$'\n'/%0A}"; echo "::notice title=${LABEL:+$LABEL: }$1:
 note "Version" "$($BIN --version) — $(lipo -archs "$BIN") — macOS $(sw_vers -productVersion)"
 
 OCR_OUT="$($BIN --ocr-selftest)"
+if printf '%s' "$OCR_OUT" | grep -q $'\u200e\|\u200f'; then OCR_OUT="$OCR_OUT
+[!] contains hidden bidi marks"; fi
 echo "$OCR_OUT"
 note "OCR self-test" "$OCR_OUT"
 

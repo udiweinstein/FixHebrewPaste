@@ -602,14 +602,72 @@ enum OCR {
         defer { try? FileManager.default.removeItem(at: file) }
 
         let langs = tesseractLanguages(binary).contains("eng") ? "heb+eng" : "heb"
-        let r = run(binary, [file.path, "stdout", "-l", langs, "--psm", "3"])
-        var text = String(decoding: r.out, as: UTF8.self)
-            .replacingOccurrences(of: "\u{0C}", with: "")
-            .replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        text = text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
-        guard r.status == 0, !text.isEmpty else { throw Failure.noText }
+        let r = run(binary, [file.path, "stdout", "-l", langs, "--psm", "3", "tsv"])
+        guard r.status == 0 else { throw Failure.noText }
+        let text = textFromTSV(String(decoding: r.out, as: UTF8.self))
+        guard !text.isEmpty else { throw Failure.noText }
         return text
+    }
+
+    private static func isBidiControl(_ s: Unicode.Scalar) -> Bool {
+        let v = s.value
+        return v == 0x200E || v == 0x200F || v == 0x061C || (0x202A...0x202E).contains(v) || (0x2066...0x2069).contains(v)
+    }
+
+    /// בונה טקסט בסדר לוגי ממיקומי המילים (לא סומך על ניחוש הכיוון של Tesseract),
+    /// ומסיר את סימני הכיוון הנסתרים שהוא מוסיף.
+    static func textFromTSV(_ tsv: String) -> String {
+        struct Word { let x: Int; let text: String }
+        var lines: [(key: String, block: String, words: [Word])] = []
+        for row in tsv.components(separatedBy: "\n").dropFirst() {
+            let c = row.components(separatedBy: "\t")
+            guard c.count >= 12, c[0] == "5", let x = Int(c[6]) else { continue }
+            let word = String(String.UnicodeScalarView(c[11...].joined(separator: " ").unicodeScalars.filter { !isBidiControl($0) }))
+                .trimmingCharacters(in: .whitespaces)
+            guard !word.isEmpty else { continue }
+            let key = "\(c[2]).\(c[3]).\(c[4])"
+            if lines.last?.key == key {
+                lines[lines.count - 1].words.append(Word(x: x, text: word))
+            } else {
+                lines.append((key, c[2], [Word(x: x, text: word)]))
+            }
+        }
+
+        func hebrew(_ w: String) -> Int { w.unicodeScalars.filter(Bidi.isRTL).count }
+        func latin(_ w: String) -> Int { w.unicodeScalars.filter { $0.properties.isAlphabetic && !Bidi.isRTL($0) }.count }
+
+        var out: [String] = []
+        var lastBlock: String? = nil
+        for line in lines {
+            if let b = lastBlock, b != line.block { out.append("") }
+            lastBlock = line.block
+            let all = line.words.map { $0.text }.joined()
+            let rtl = hebrew(all) >= latin(all) && hebrew(all) > 0
+            // מילים בסדר הקריאה של השורה (מימין לשמאל בשורה עברית)
+            let ordered = line.words.sorted { rtl ? $0.x > $1.x : $0.x < $1.x }
+            // רצפים בכיוון ההפוך (אנגלית בתוך עברית / עברית בתוך אנגלית) — מחזירים לסדר שלהם
+            func isForeign(_ t: String) -> Bool { rtl ? (hebrew(t) == 0 && latin(t) > 0) : hebrew(t) > 0 }
+            func isNeutral(_ t: String) -> Bool { hebrew(t) == 0 && latin(t) == 0 }   // מספרים, סימנים
+            var result: [String] = []
+            var run: [String] = []
+            for (k, w) in ordered.enumerated() {
+                var foreign = isForeign(w.text)
+                if isNeutral(w.text) {
+                    // מספר שצמוד לרצף זר ("Windows 95, 98") שייך לרצף
+                    let next = ordered[(k + 1)...].first { !isNeutral($0.text) }
+                    foreign = next.map { isForeign($0.text) } ?? false
+                }
+                if foreign {
+                    run.append(w.text)
+                } else {
+                    result += run.reversed(); run = []
+                    result.append(w.text)
+                }
+            }
+            result += run.reversed()
+            out.append(result.joined(separator: " "))
+        }
+        return out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: Apple Vision (מובנה; בלי עברית)
@@ -696,7 +754,7 @@ if cliArgs.contains("--ocr-selftest") {
     } else {
         print("Tesseract: not installed")
     }
-    let sample = "שלום עולם, זו בדיקה של OCR\nHello World 2026\nהפרויקט ב-GitHub הוא JS Paint"
+    let sample = "שלום עולם, זו בדיקה של OCR\nHello World 2026\nהפרויקט ב-GitHub הוא JS Paint\nגרסאות Windows 95, 98 ו-XP"
     guard let img = OCR.renderTestImage(sample) else { print("render failed"); exit(1) }
     do {
         let r = try OCR.recognize(img)
