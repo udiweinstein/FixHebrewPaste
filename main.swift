@@ -763,7 +763,42 @@ enum Updates {
         return false
     }
 
+    /// קודם דרך ה-API של GitHub; אם הוא לא זמין (למשל מגבלת בקשות) — דרך עמוד ה-Releases הרגיל
     static func fetchLatest(_ completion: @escaping (Result<Release, Error>) -> Void) {
+        fetchFromAPI { result in
+            if case .success = result { return completion(result) }
+            fetchFromPage(completion)
+        }
+    }
+
+    static func fetchFromPageForTest(_ done: @escaping (String) -> Void) {
+        fetchFromPage { r in
+            switch r {
+            case .success(let rel): done("latest \(rel.version) (\(rel.pageURL.absoluteString))")
+            case .failure(let e): done("failed: \(e)")
+            }
+        }
+    }
+
+    /// github.com/.../releases/latest מפנה ל-.../releases/tag/vX.Y.Z
+    private static func fetchFromPage(_ completion: @escaping (Result<Release, Error>) -> Void) {
+        var req = URLRequest(url: URL(string: AppInfo.repoURL + "/releases/latest")!,
+                             cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        req.httpMethod = "HEAD"
+        req.setValue("FixHebrewPaste/\(AppInfo.version)", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: req) { _, response, error in
+            if let error = error { return completion(.failure(error)) }
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  let final = http.url, final.path.contains("/releases/tag/") else {
+                return completion(.failure(Failure.badResponse))
+            }
+            let tag = final.lastPathComponent
+            let version = tag.hasPrefix("v") || tag.hasPrefix("V") ? String(tag.dropFirst()) : tag
+            completion(.success(Release(version: version, pageURL: final)))
+        }.resume()
+    }
+
+    private static func fetchFromAPI(_ completion: @escaping (Result<Release, Error>) -> Void) {
         var req = URLRequest(url: apiURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         req.setValue("FixHebrewPaste/\(AppInfo.version)", forHTTPHeaderField: "User-Agent")
@@ -801,6 +836,9 @@ if cliArgs.contains("--check-update") {
         done.signal()
     }
     done.wait()
+    let done2 = DispatchSemaphore(value: 0)
+    Updates.fetchFromPageForTest { print("page fallback: \($0)"); done2.signal() }
+    done2.wait()
     print("compare self-test: \(Updates.isNewer("1.10.0", than: "1.9.2")) \(Updates.isNewer("1.2.0", than: "1.2")) \(Updates.isNewer("v2.0", than: "1.9.9"))")
     exit(0)
 }
