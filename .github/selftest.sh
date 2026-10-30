@@ -3,7 +3,7 @@
 set -e
 BIN=FixHebrewPaste.app/Contents/MacOS/FixHebrewPaste
 
-note() { local msg="${2//$'\n'/%0A}"; echo "::notice title=$1::$msg"; }
+note() { local msg="${2//$'\n'/%0A}"; echo "::notice title=${LABEL:+$LABEL: }$1::$msg"; }
 
 note "Version" "$($BIN --version) — $(lipo -archs "$BIN") — macOS $(sw_vers -productVersion)"
 

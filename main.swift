@@ -509,6 +509,11 @@ enum OCR {
             for: .accurate, revision: VNRecognizeTextRequestRevision2)) ?? []
     }
 
+    static let hebrewHelp =
+        "זיהוי עברית דורש את מנוע ה-OCR החינמי Tesseract (ה-OCR המובנה של macOS לא תומך בעברית).\n" +
+        "להתקנה, הרץ ב-Terminal:\n\nbrew install tesseract tesseract-lang\n\n" +
+        "(נדרש Homebrew: brew.sh). אחרי ההתקנה FixHebrewPaste ישתמש בו אוטומטית."
+
     static var supportsHebrew: Bool {
         supportedLanguages().contains { $0.lowercased().hasPrefix("he") || $0.lowercased().hasPrefix("iw") }
     }
@@ -530,8 +535,86 @@ enum OCR {
         return nil
     }
 
-    /// מזהה טקסט ומחזיר אותו כטקסט רגיל, שורה אחרי שורה (מלמעלה למטה)
-    static func recognize(_ image: CGImage) throws -> String {
+    enum Engine: String { case tesseract = "Tesseract", vision = "Apple Vision" }
+
+    /// מזהה טקסט ומחזיר אותו כטקסט רגיל. עברית דורשת Tesseract (Apple Vision לא תומך בעברית).
+    static func recognize(_ image: CGImage) throws -> (text: String, engine: Engine) {
+        if let tess = tesseractPath(), tesseractLanguages(tess).contains("heb") {
+            return (try recognizeWithTesseract(image, binary: tess), .tesseract)
+        }
+        return (try recognizeWithVision(image), .vision)
+    }
+
+    // MARK: Tesseract (אם מותקן: brew install tesseract tesseract-lang)
+
+    static func tesseractPath() -> String? {
+        ["/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/opt/local/bin/tesseract"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Hebrew OCR זמין במחשב הזה?
+    static var hebrewAvailable: Bool {
+        if let t = tesseractPath(), tesseractLanguages(t).contains("heb") { return true }
+        return supportsHebrew
+    }
+
+    private static func run(_ binary: String, _ args: [String]) -> (status: Int32, out: Data) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: binary)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return (-1, Data()) }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus, data)
+    }
+
+    static func tesseractLanguages(_ binary: String) -> [String] {
+        let r = run(binary, ["--list-langs"])
+        return String(decoding: r.out, as: UTF8.self)
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("List of") }
+    }
+
+    /// מגדיל תמונות קטנות פי 2 — Tesseract מדויק יותר בטקסט גדול
+    private static func upscaled(_ image: CGImage) -> CGImage {
+        guard image.width < 2000 else { return image }
+        let w = image.width * 2, h = image.height * 2
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return image }
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage() ?? image
+    }
+
+    static func recognizeWithTesseract(_ image: CGImage, binary: String) throws -> String {
+        let rep = NSBitmapImageRep(cgImage: upscaled(image))
+        guard let png = rep.representation(using: .png, properties: [:]) else { throw Failure.noImage }
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fixhebrewpaste-ocr-\(UUID().uuidString).png")
+        try png.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        let langs = tesseractLanguages(binary).contains("eng") ? "heb+eng" : "heb"
+        let r = run(binary, [file.path, "stdout", "-l", langs, "--psm", "3"])
+        var text = String(decoding: r.out, as: UTF8.self)
+            .replacingOccurrences(of: "\u{0C}", with: "")
+            .replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        text = text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
+        guard r.status == 0, !text.isEmpty else { throw Failure.noText }
+        return text
+    }
+
+    // MARK: Apple Vision (מובנה; בלי עברית)
+
+    static func recognizeWithVision(_ image: CGImage) throws -> String {
         let req = VNRecognizeTextRequest()
         req.recognitionLevel = .accurate
         req.usesLanguageCorrection = true
@@ -607,11 +690,17 @@ if cliArgs.contains("--version") {
 if cliArgs.contains("--ocr-selftest") {
     // מדפיס את שפות ה-OCR הנתמכות ומריץ OCR על תמונה עם עברית ואנגלית
     print("OCR languages: \(OCR.supportedLanguages().joined(separator: ", "))")
-    print("Hebrew supported: \(OCR.supportsHebrew)")
+    print("Hebrew in Apple Vision: \(OCR.supportsHebrew)")
+    if let t = OCR.tesseractPath() {
+        print("Tesseract: \(t) — languages: \(OCR.tesseractLanguages(t).joined(separator: ", "))")
+    } else {
+        print("Tesseract: not installed")
+    }
     let sample = "שלום עולם, זו בדיקה של OCR\nHello World 2026\nהפרויקט ב-GitHub הוא JS Paint"
     guard let img = OCR.renderTestImage(sample) else { print("render failed"); exit(1) }
     do {
-        print("OCR result:\n\(try OCR.recognize(img))")
+        let r = try OCR.recognize(img)
+        print("OCR engine: \(r.engine.rawValue)\nOCR result:\n\(r.text)")
     } catch {
         print("OCR error: \(error)")
         exit(1)
@@ -622,7 +711,7 @@ if let i = cliArgs.firstIndex(of: "--cli-ocr"), i + 1 < cliArgs.count {
     guard let img = NSImage(contentsOfFile: cliArgs[i + 1])?.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
         print("cannot read image"); exit(1)
     }
-    print((try? OCR.recognize(img)) ?? "")
+    print((try? OCR.recognize(img).text) ?? "")
     exit(0)
 }
 if cliArgs.contains("--cli-html") || cliArgs.contains("--cli-text") || cliArgs.contains("--cli-rtf") {
@@ -895,14 +984,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.ocrRunning = false
                 self.statusItem.button?.title = "אA"
                 switch result {
-                case .success(let text):
+                case .success(let r):
                     pb.clearContents()
-                    pb.setString(text, forType: .string)
+                    pb.setString(r.text, forType: .string)
                     self.lastChangeCount = pb.changeCount   // שהתיקון האוטומטי לא ימיר אותו ל-HTML
                     self.flashIcon()
+                    if r.engine == .vision && !OCR.supportsHebrew
+                        && !UserDefaults.standard.bool(forKey: "warnedNoHebrewOCR") {
+                        UserDefaults.standard.set(true, forKey: "warnedNoHebrewOCR")
+                        self.showMessage("הטקסט הועתק — אבל בלי תמיכה בעברית",
+                                         OCR.hebrewHelp + "\n\nטקסט באנגלית מזוהה גם בלי זה. ההודעה הזו לא תוצג שוב.")
+                    }
                 case .failure:
-                    let hint = OCR.supportsHebrew ? ""
-                        : "\n\nשים לב: גרסת macOS הזו לא תומכת בזיהוי עברית, רק אנגלית ושפות אחרות."
+                    let hint = OCR.hebrewAvailable ? "" : "\n\n" + OCR.hebrewHelp
                     self.showMessage("לא נמצא טקסט בתמונה", "נסה תמונה חדה יותר או צילום מסך של אזור קטן יותר." + hint)
                 }
             }

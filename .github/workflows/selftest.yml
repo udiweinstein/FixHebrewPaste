@@ -11,11 +11,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15, macos-26]
+        os: [macos-15, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Build app
         run: chmod +x build.sh && ./build.sh
-      - name: Self-test
-        run: .github/selftest.sh
+      - name: Self-test (built-in OCR only)
+        run: LABEL="no Tesseract" .github/selftest.sh
+      - name: Install Tesseract with Hebrew
+        run: |
+          brew install tesseract
+          curl -fsSL -o "$(brew --prefix)/share/tessdata/heb.traineddata" \
+            https://github.com/tesseract-ocr/tessdata/raw/main/heb.traineddata
+      - name: Self-test (with Tesseract)
+        run: LABEL="with Tesseract" .github/selftest.sh
