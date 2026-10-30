@@ -5,7 +5,7 @@ name: Build & Release
 on:
   push:
     branches: [main]
-    paths: ["main.swift", "build.sh", "VERSION", ".github/workflows/release.yml"]
+    paths: ["main.swift", "build.sh", "VERSION", "RELEASE_NOTES.md", ".github/workflows/release.yml"]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -36,6 +36,9 @@ jobs:
           chmod +x build.sh
           VERSION="${{ steps.v.outputs.tag }}" ./build.sh
 
+      - name: Self-test
+        run: chmod +x .github/selftest.sh && .github/selftest.sh
+
       - name: Package
         run: ditto -c -k --sequesterRsrc --keepParent FixHebrewPaste.app FixHebrewPaste.zip
 
@@ -46,16 +49,4 @@ jobs:
           name: FixHebrewPaste ${{ steps.v.outputs.tag }}
           target_commitish: ${{ github.sha }}
           files: FixHebrewPaste.zip
-          body: |
-            ### מה חדש
-            - **⌘R** פותח את Terminal
-            - **⌘D** ממזער את כל החלונות, ולחיצה נוספת מחזירה אותם (כמו Win+D)
-            - מתג בתפריט להפעלה/כיבוי של ⌘R / ⌘D
-            - פתיחה אוטומטית בהפעלת המחשב (macOS 13+)
-            - בינארי Universal: Apple Silicon ו-Intel
-
-            ### התקנה
-            1. מורידים את `FixHebrewPaste.zip`, פותחים וגוררים את האפליקציה לתיקיית **Applications**.
-            2. בפתיחה הראשונה macOS יחסום אותה (האפליקציה לא חתומה אצל Apple):
-               **System Settings ← Privacy & Security ← Open Anyway**.
-               או ב-Terminal: `xattr -dr com.apple.quarantine /Applications/FixHebrewPaste.app`
+          body_path: RELEASE_NOTES.md

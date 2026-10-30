@@ -1,0 +1,17 @@
+name: Self-test
+
+# בונה ומריץ בדיקות (בלי לפרסם Release) על כל ענף שאינו main
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app
+        run: chmod +x build.sh && ./build.sh
+      - name: Self-test
+        run: .github/selftest.sh

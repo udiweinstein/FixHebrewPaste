@@ -16,7 +16,7 @@ mkdir -p "$APP/Contents/MacOS" build
 built=()
 for arch in arm64 x86_64; do
     if swiftc -O -target "$arch-apple-macos11.0" main.swift -o "build/$BIN-$arch" \
-        -framework Cocoa -framework Carbon -framework ServiceManagement; then
+        -framework Cocoa -framework Carbon -framework ServiceManagement -framework Vision; then
         built+=("build/$BIN-$arch")
     else
         echo "⚠️  הבנייה ל-$arch נכשלה — ממשיך בלעדיה"

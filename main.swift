@@ -16,6 +16,7 @@
 import Cocoa
 import Carbon
 import ServiceManagement
+import Vision
 
 // MARK: - סיווג כיווניות
 
@@ -493,9 +494,137 @@ enum PlainFixer {
     }
 }
 
+// MARK: - OCR (זיהוי טקסט בתמונה — Apple Vision, מקומי לגמרי)
+
+enum OCR {
+    enum Failure: Error { case noImage, noText }
+
+    /// השפות שהזיהוי תומך בהן במערכת הזו
+    static func supportedLanguages(for req: VNRecognizeTextRequest = VNRecognizeTextRequest()) -> [String] {
+        req.recognitionLevel = .accurate
+        if #available(macOS 12.0, *) {
+            return (try? req.supportedRecognitionLanguages()) ?? []
+        }
+        return (try? VNRecognizeTextRequest.supportedRecognitionLanguages(
+            for: .accurate, revision: VNRecognizeTextRequestRevision2)) ?? []
+    }
+
+    static var supportsHebrew: Bool {
+        supportedLanguages().contains { $0.lowercased().hasPrefix("he") || $0.lowercased().hasPrefix("iw") }
+    }
+
+    /// תמונה מהלוח: צילום מסך / תמונה שהועתקה, או קובץ תמונה שהועתק מ-Finder
+    static func imageFromPasteboard(_ pb: NSPasteboard) -> CGImage? {
+        if let urls = pb.readObjects(forClasses: [NSURL.self],
+                                     options: [.urlReadingFileURLsOnly: true,
+                                               .urlReadingContentsConformToTypes: ["public.image"]]) as? [URL],
+           let url = urls.first,
+           let img = NSImage(contentsOf: url),
+           let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return cg
+        }
+        if let img = NSImage(pasteboard: pb),
+           let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return cg
+        }
+        return nil
+    }
+
+    /// מזהה טקסט ומחזיר אותו כטקסט רגיל, שורה אחרי שורה (מלמעלה למטה)
+    static func recognize(_ image: CGImage) throws -> String {
+        let req = VNRecognizeTextRequest()
+        req.recognitionLevel = .accurate
+        req.usesLanguageCorrection = true
+        let supported = supportedLanguages(for: req)
+        // עברית קודם, כדי שתקבל עדיפות; אחריה אנגלית
+        let hebrew = supported.filter { $0.lowercased().hasPrefix("he") || $0.lowercased().hasPrefix("iw") }
+        let english = supported.filter { $0.lowercased().hasPrefix("en") }
+        if !(hebrew + english).isEmpty { req.recognitionLanguages = hebrew + english }
+
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([req])
+        let obs = (req.results ?? []).compactMap { o -> (CGRect, String)? in
+            guard let s = o.topCandidates(1).first?.string, !s.isEmpty else { return nil }
+            return (o.boundingBox, s)
+        }
+        guard !obs.isEmpty else { throw Failure.noText }
+
+        // קיבוץ לשורות לפי גובה (בקואורדינטות של Vision, y=0 בתחתית)
+        let sorted = obs.sorted { $0.0.midY > $1.0.midY }
+        var lines: [[(CGRect, String)]] = []
+        for o in sorted {
+            if let last = lines.last?.first, abs(last.0.midY - o.0.midY) < max(last.0.height, o.0.height) * 0.5 {
+                lines[lines.count - 1].append(o)
+            } else {
+                lines.append([o])
+            }
+        }
+        return lines.map { line -> String in
+            let rtl = line.map { $0.1 }.joined().unicodeScalars.filter(Bidi.isRTL).count
+                    > line.map { $0.1 }.joined().unicodeScalars.filter { $0.properties.isAlphabetic && !Bidi.isRTL($0) }.count
+            let ordered = line.sorted { rtl ? $0.0.minX > $1.0.minX : $0.0.minX < $1.0.minX }
+            return ordered.map { $0.1 }.joined(separator: " ")
+        }.joined(separator: "\n")
+    }
+
+    /// מצייר טקסט לתמונה (לבדיקה עצמית)
+    static func renderTestImage(_ text: String) -> CGImage? {
+        let attr = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 44),
+            .foregroundColor: NSColor.black,
+        ])
+        let size = attr.boundingRect(with: NSSize(width: 2000, height: 2000), options: [.usesLineFragmentOrigin]).size
+        let w = Int(size.width) + 80, h = Int(size.height) + 80
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: w, height: h).fill()
+        attr.draw(with: NSRect(x: 40, y: 40, width: size.width + 1, height: size.height + 1), options: [.usesLineFragmentOrigin])
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.cgImage
+    }
+}
+
+// MARK: - גרסה
+
+enum AppInfo {
+    static var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }
+    static let repoURL = "https://github.com/udiweinstein/FixHebrewPaste"
+}
+
 // MARK: - מצב שורת פקודה (לבדיקות)
 
 let cliArgs = CommandLine.arguments
+if cliArgs.contains("--version") {
+    print("FixHebrewPaste \(AppInfo.version)")
+    exit(0)
+}
+if cliArgs.contains("--ocr-selftest") {
+    // מדפיס את שפות ה-OCR הנתמכות ומריץ OCR על תמונה עם עברית ואנגלית
+    print("OCR languages: \(OCR.supportedLanguages().joined(separator: ", "))")
+    print("Hebrew supported: \(OCR.supportsHebrew)")
+    let sample = "שלום עולם, זו בדיקה של OCR\nHello World 2026\nהפרויקט ב-GitHub הוא JS Paint"
+    guard let img = OCR.renderTestImage(sample) else { print("render failed"); exit(1) }
+    do {
+        print("OCR result:\n\(try OCR.recognize(img))")
+    } catch {
+        print("OCR error: \(error)")
+        exit(1)
+    }
+    exit(0)
+}
+if let i = cliArgs.firstIndex(of: "--cli-ocr"), i + 1 < cliArgs.count {
+    guard let img = NSImage(contentsOfFile: cliArgs[i + 1])?.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        print("cannot read image"); exit(1)
+    }
+    print((try? OCR.recognize(img)) ?? "")
+    exit(0)
+}
 if cliArgs.contains("--cli-html") || cliArgs.contains("--cli-text") || cliArgs.contains("--cli-rtf") {
     let input = String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
     if cliArgs.contains("--cli-html") {
@@ -598,8 +727,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pasteItem = NSMenuItem(title: "תקן והדבק", action: #selector(fixAndPasteAction), keyEquivalent: "v")
         pasteItem.keyEquivalentModifierMask = [.control, .option, .command]
         pasteItem.target = self
+        let ocrItem = NSMenuItem(title: "OCR: תמונה בלוח ← טקסט רגיל", action: #selector(ocrClipboardAction), keyEquivalent: "o")
+        ocrItem.keyEquivalentModifierMask = [.control, .option]
+        ocrItem.target = self
         menu.addItem(fixItem)
         menu.addItem(pasteItem)
+        menu.addItem(ocrItem)
         menu.addItem(.separator())
 
         let header = NSMenuItem(title: "פורמט ההדבקה:", action: nil, keyEquivalent: "")
@@ -642,6 +775,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(loginItem)
         menu.addItem(.separator())
+        let aboutItem = NSMenuItem(title: "אודות FixHebrewPaste (גרסה \(AppInfo.version))", action: #selector(showAbout), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
         menu.addItem(NSMenuItem(title: "יציאה", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
         refreshChecks()
@@ -738,6 +874,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func fixClipboardAction() { fixClipboard() }
 
+    // MARK: OCR מהלוח
+
+    private var ocrRunning = false
+
+    @objc func ocrClipboardAction() {
+        guard !ocrRunning else { return }
+        let pb = NSPasteboard.general
+        guard let image = OCR.imageFromPasteboard(pb) else {
+            showMessage("אין תמונה בלוח",
+                        "העתק קודם תמונה או צילום מסך ללוח (למשל ⌃⇧⌘4), ואז הפעל OCR שוב.")
+            return
+        }
+        ocrRunning = true
+        statusItem.button?.title = "…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try OCR.recognize(image) }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.ocrRunning = false
+                self.statusItem.button?.title = "אA"
+                switch result {
+                case .success(let text):
+                    pb.clearContents()
+                    pb.setString(text, forType: .string)
+                    self.lastChangeCount = pb.changeCount   // שהתיקון האוטומטי לא ימיר אותו ל-HTML
+                    self.flashIcon()
+                case .failure:
+                    let hint = OCR.supportsHebrew ? ""
+                        : "\n\nשים לב: גרסת macOS הזו לא תומכת בזיהוי עברית, רק אנגלית ושפות אחרות."
+                    self.showMessage("לא נמצא טקסט בתמונה", "נסה תמונה חדה יותר או צילום מסך של אזור קטן יותר." + hint)
+                }
+            }
+        }
+    }
+
+    private func showMessage(_ title: String, _ text: String) {
+        NSSound.beep()
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.runModal()
+    }
+
+    // MARK: אודות
+
+    @objc func showAbout() {
+        let credits = NSMutableAttributedString()
+        let body: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11),
+                                                   .foregroundColor: NSColor.labelColor]
+        credits.append(NSAttributedString(string:
+            "תיקון טקסט עברית/אנגלית להדבקה ב-PowerPoint, OCR מהלוח וקיצורי חלונות.\n\n" +
+            "⌃⌥V  תקן את הלוח\n⌃⌥⌘V  תקן והדבק\n⌃⌥O  OCR מהלוח\n⌘R  Terminal    ⌘D  מזעור חלונות\n\n",
+            attributes: body))
+        var link = body
+        link[.link] = URL(string: AppInfo.repoURL)!
+        credits.append(NSAttributedString(string: "github.com/udiweinstein/FixHebrewPaste", attributes: link))
+
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "FixHebrewPaste",
+            .applicationVersion: AppInfo.version,
+            .version: "",
+            .credits: credits,
+        ])
+    }
+
     @objc func fixAndPasteAction() {
         guard fixClipboard() else { return }
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
@@ -760,6 +963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case 2: fixAndPasteAction()
         case 3: openTerminal()
         case 4: toggleMinimizeAll()
+        case 5: ocrClipboardAction()
         default: break
         }
     }
@@ -779,6 +983,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         _ = registerKey(id: 1, keyCode: kVK_ANSI_V, mods: controlKey | optionKey)            // ⌃⌥V  — תקן את הלוח
         _ = registerKey(id: 2, keyCode: kVK_ANSI_V, mods: controlKey | optionKey | cmdKey)   // ⌃⌥⌘V — תקן והדבק
+        _ = registerKey(id: 5, keyCode: kVK_ANSI_O, mods: controlKey | optionKey)            // ⌃⌥O  — OCR מהלוח
         setWindowShortcuts(enabled: windowShortcuts)
     }
 
